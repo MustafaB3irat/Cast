@@ -40,7 +40,7 @@ The ≤90-second physical-device demo is being finished separately. This reposit
 
 Decisions uses measured geometry, proximity, lighting changes and recent actions. One request may be in flight, with a four-second minimum interval and error backoff. Voice input takes priority. This is **not visual recognition of everything in the room**: no camera images are sent to OpenAI, and approaching-person avoidance is not implemented.
 
-Official references: [Realtime WebSockets](https://developers.openai.com/api/docs/guides/realtime-websocket), [Decisions](https://developers.openai.com/api/docs/guides/decisions), [RealityKit](https://developer.apple.com/documentation/realitykit).
+Official references: [Realtime WebSockets](https://developers.openai.com/api/docs/guides/voice-websockets), [Decisions](https://developers.openai.com/api/docs/guides/decisions), [RealityKit](https://developer.apple.com/documentation/realitykit).
 
 ## Build and run
 
