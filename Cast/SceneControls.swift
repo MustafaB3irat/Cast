@@ -6,6 +6,21 @@ struct SceneControls: View {
     var openActions: () -> Void
     @State private var connecting = false
     @State private var showLiveInfo = false
+    @State private var showActivity = false
+
+    private var isConnecting: Bool {
+        connecting || voice.status == "Connecting…" || voice.status == "Requesting microphone…"
+    }
+    private var needsAttention: Bool {
+        let routine = ["Voice off", "Listening", "Listening to you…", "Thinking…", "Character reacting", "Connecting…", "Requesting microphone…"]
+        return !routine.contains(voice.status) || (voice.isLive &&
+            (voice.decisionStatus.contains("unavailable") || voice.decisionStatus.contains("failed") || voice.decisionStatus.contains("needs your API key")))
+    }
+    private var liveState: String {
+        if isConnecting { return "Connecting" }
+        if needsAttention { return "Needs attention" }
+        return voice.isLive ? "On" : "Off"
+    }
 
     private var hasCharacters: Bool {
         #if DEBUG && targetEnvironment(simulator)
@@ -30,8 +45,11 @@ struct SceneControls: View {
                     .frame(width: 32)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Live mode").font(.headline)
-                    Text(voice.status == "Voice off" ? "Voice off" : voice.status)
-                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Button { showActivity = true } label: {
+                        Label(liveState, systemImage: needsAttention ? "exclamationmark.circle.fill" : "circle.fill")
+                            .font(.caption).lineLimit(1)
+                            .foregroundStyle(needsAttention ? Color.orange : (voice.isLive ? Color.green : Color.secondary))
+                    }.buttonStyle(.plain).accessibilityLabel("Live mode: " + liveState + ". Show details")
                 }
                 Spacer(minLength: 8)
                 Button(voice.isLive ? "End live" : "Go live") {
@@ -45,43 +63,42 @@ struct SceneControls: View {
                 .disabled(connecting)
             }
 
-            if voice.isLive && hasCharacters {
-                Text(scene.isPlaying ? voice.decisionStatus : "AI play paused")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-
-            if !voice.caption.isEmpty && voice.isLive {
-                Text(voice.caption).font(.subheadline).lineLimit(2)
-            }
-
             if hasCharacters {
                 Divider()
                 HStack {
                     Text(scene.selectedID == nil ? "Your cast" : scene.selectedName).font(.subheadline.weight(.semibold))
                     Spacer()
-                    Text(scene.isPlaying ? "Playing" : "\(scene.placedRoster.count) in the scene")
+                    Text(scene.isPlaying ? "Playing" : "Paused")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 HStack(spacing: 12) {
                     Button(scene.isPlaying ? "Pause" : "Play", systemImage: scene.isPlaying ? "pause.fill" : "play.fill") {
-                        if !scene.isPlaying { voice.resumeSceneReactions() }
-                        scene.togglePlay()
+                        if scene.isPlaying {
+                            scene.stopAll()
+                            voice.stopSpeech()
+                            scene.status = "Paused"
+                        } else {
+                            voice.resumeSceneReactions()
+                            scene.togglePlay()
+                        }
                     }
                     .disabled(!scene.tracking || scene.selectedID != nil)
                     Button("Actions", systemImage: "hand.wave") { openActions() }
                         .disabled(!scene.tracking)
                     Spacer(minLength: 0)
-                    Button("Stop", systemImage: "stop.fill") { scene.stopAll(); voice.stopSpeech() }
-                        .labelStyle(.iconOnly).accessibilityLabel("Stop")
                 }
                 .buttonStyle(.bordered).controlSize(.large)
-            } else if voice.isLive {
-                Button("Stop", systemImage: "stop.fill") { scene.stopAll(); voice.stopSpeech() }
-                    .buttonStyle(.bordered)
             }
 
-            Text(scene.status).font(.caption).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            Button { showActivity = true } label: {
+                HStack {
+                    Label(needsAttention ? "Connection needs attention" : "Activity", systemImage: needsAttention ? "exclamationmark.circle" : "waveform.path")
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                }
+                .font(.caption).foregroundStyle(needsAttention ? Color.orange : Color.secondary)
+                .frame(height: 28)
+            }.buttonStyle(.plain)
 
             HStack {
                 Button { showLiveInfo = true } label: {
@@ -89,16 +106,37 @@ struct SceneControls: View {
                         .font(.caption2)
                 }.buttonStyle(.plain).foregroundStyle(.secondary)
                 Spacer(minLength: 0)
-                if voice.isLive {
-                    Menu {
-                        Toggle("React to surroundings", isOn: $voice.sceneReactionsEnabled)
-                    } label: { Image(systemName: "slider.horizontal.3").frame(width: 44, height: 32) }
-                        .accessibilityLabel("Live options")
-                }
+                Menu {
+                    Toggle("React to surroundings", isOn: $voice.sceneReactionsEnabled)
+                } label: { Image(systemName: "slider.horizontal.3").frame(width: 44, height: 32) }
+                    .accessibilityLabel("Live options").disabled(!voice.isLive)
             }
             }
         }
         .padding(20).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 28))
+        .sheet(isPresented: $showActivity) {
+            NavigationStack {
+                List {
+                    Section("Connection") { Text(voice.status) }
+                    Section("Voice command") {
+                        if !voice.heardText.isEmpty { LabeledContent("Heard", value: voice.heardText) }
+                        Text(voice.commandResult)
+                    }
+                    if voice.isLive {
+                        Section("AI play") { Text(scene.isPlaying ? voice.decisionStatus : "Paused") }
+                    }
+                    Section("Scene") {
+                        Text(scene.status)
+                        Text(scene.perceptionStatus).foregroundStyle(.secondary)
+                    }
+                    if voice.isLive && !voice.caption.isEmpty {
+                        Section("Latest response") { Text(voice.caption) }
+                    }
+                }
+                .navigationTitle("Activity").navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showActivity = false } } }
+            }.presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
+        }
         .sheet(isPresented: $showLiveInfo) {
             NavigationStack {
                 List {
@@ -185,6 +223,11 @@ struct CharacterActionsSheet: View {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
                 ToolbarItem(placement: .topBarLeading) {
                     Menu {
+                        Button("Stop all", systemImage: "stop.fill") {
+                            scene.stopAll()
+                            voice.stopSpeech()
+                            dismiss()
+                        }
                         Button("Clear scene", role: .destructive) { confirmClear = true }
                     } label: { Image(systemName: "ellipsis") }.accessibilityLabel("Scene options")
                 }

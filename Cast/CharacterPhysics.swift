@@ -2,6 +2,8 @@ import RealityKit
 import simd
 
 @MainActor enum CharacterPhysics {
+    static let scaleRange: ClosedRange<Float> = 0.25...10
+
     static let characters = CollisionGroup(rawValue: 1 << 8)
 
     static func configure(_ entity: ModelEntity, bounds: BoundingBox, scale: Float, mode: PhysicsBodyMode) {
@@ -20,7 +22,7 @@ import simd
         entity.physicsMotion = PhysicsMotionComponent()
     }
 
-    static func mass(scale: Float) -> Float { 0.35 * pow(max(0.25, min(3, scale)), 3) }
+    static func mass(scale: Float) -> Float { 0.35 * pow(max(scaleRange.lowerBound, min(scaleRange.upperBound, scale)), 3) }
 
     /// Circular horizontal envelope stays conservative when the avatar rotates.
     static func overlaps(position: SIMD3<Float>, bounds: BoundingBox, scale: Float,
@@ -33,6 +35,11 @@ import simd
         let radius = simd_length(SIMD2(bounds.extents.x, bounds.extents.z)) * scale / 2 + 0.008
         let otherRadius = simd_length(SIMD2(otherBounds.extents.x, otherBounds.extents.z)) * otherScale / 2 + 0.008
         return simd_length(SIMD2(position.x - otherPosition.x, position.z - otherPosition.z)) < radius + otherRadius
+    }
+
+    static func needsSupportRecovery(position: SIMD3<Float>, safePosition: SIMD3<Float>) -> Bool {
+        guard position.x.isFinite, position.y.isFinite, position.z.isFinite else { return true }
+        return position.y < safePosition.y - 0.08
     }
 
     /// A bounded locomotion step; the caller validates support and swept clearance.

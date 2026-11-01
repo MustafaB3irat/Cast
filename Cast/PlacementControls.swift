@@ -33,7 +33,11 @@ struct PlacementControls: View {
                 }.accessibilityLabel("Character options")
             }
 
+            if let feedback = scene.scaleFeedback {
+                Text(feedback).font(.caption).foregroundStyle(.secondary)
+            }
             if scene.movingSelection {
+                Text(scene.status).font(.caption).foregroundStyle(.secondary)
                 Button("Cancel move") {
                     scene.movingSelection = false
                     scene.status = "\(scene.selectedName) selected"

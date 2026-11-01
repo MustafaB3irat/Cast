@@ -16,7 +16,7 @@ final class CommandTests: XCTestCase {
             let rest = models.map { $0.jointTransforms }
             let animator = CharacterAnimator(entity)
             XCTAssertGreaterThan(animator.jointCount, 0, name)
-            for action in ["wave", "dance", "move", "jump", "inspect", "spar"] {
+            for action in ["wave", "dance", "move", "jump", "inspect", "spar", "startle"] {
                 animator.applyPose(action: action, time: 0.5, duration: 3)
                 let changed = zip(models, rest).contains { model, original in
                     zip(model.jointTransforms, original).contains { abs(simd_dot($0.rotation.vector, $1.rotation.vector)) < 0.9999 }
@@ -113,9 +113,9 @@ final class CommandTests: XCTestCase {
         XCTAssertEqual(scene.selectedScale, 1.7, accuracy: 0.001)
         XCTAssertEqual(scene.selectedRotation, 65, accuracy: 0.001)
         scene.setScale(100)
-        XCTAssertEqual(scene.selectedScale, 3)
+        XCTAssertEqual(scene.selectedScale, 10)
         scene.setScale(.nan)
-        XCTAssertEqual(scene.selectedScale, 3)
+        XCTAssertEqual(scene.selectedScale, 10)
         scene.removeSelected()
         XCTAssertFalse(scene.roster.contains { $0.id == id })
         XCTAssertNil(scene.selectedID)
@@ -179,6 +179,8 @@ final class CommandTests: XCTestCase {
     @MainActor func testPhysicsBodyHasGravitySolidCollisionsAndContinuousDetection() {
         let entity = ModelEntity()
         let bounds = BoundingBox(min: [-0.08, 0, -0.06], max: [0.08, 0.22, 0.06])
+        XCTAssertFalse(CharacterPhysics.overlaps(position: .zero, bounds: bounds, scale: 3, otherPosition: [1, 0, 0], otherBounds: bounds, otherScale: 1))
+        XCTAssertTrue(CharacterPhysics.overlaps(position: .zero, bounds: bounds, scale: 10, otherPosition: [1, 0, 0], otherBounds: bounds, otherScale: 1))
         CharacterPhysics.configure(entity, bounds: bounds, scale: 1, mode: .dynamic)
         XCTAssertEqual(entity.physicsBody?.mode, .dynamic)
         XCTAssertEqual(entity.physicsBody?.isAffectedByGravity, true)
@@ -190,12 +192,16 @@ final class CommandTests: XCTestCase {
         XCTAssertEqual(entity.physicsBody!.massProperties.mass, 0.35, accuracy: 0.001)
         CharacterPhysics.configure(entity, bounds: bounds, scale: 2, mode: .kinematic)
         XCTAssertEqual(entity.physicsBody!.massProperties.mass, 2.8, accuracy: 0.001)
+        CharacterPhysics.configure(entity, bounds: bounds, scale: 10, mode: .kinematic)
+        XCTAssertEqual(entity.physicsBody!.massProperties.mass, 350, accuracy: 0.01)
         XCTAssertEqual(entity.physicsBody?.mode, .kinematic)
         XCTAssertEqual(entity.physicsBody?.isContinuousCollisionDetectionEnabled, false)
     }
 
     @MainActor func testPlacementClearanceAccountsForScaleAndDifferentSurfaces() {
         let bounds = BoundingBox(min: [-0.08, 0, -0.06], max: [0.08, 0.22, 0.06])
+        XCTAssertFalse(CharacterPhysics.overlaps(position: .zero, bounds: bounds, scale: 3, otherPosition: [1, 0, 0], otherBounds: bounds, otherScale: 1))
+        XCTAssertTrue(CharacterPhysics.overlaps(position: .zero, bounds: bounds, scale: 10, otherPosition: [1, 0, 0], otherBounds: bounds, otherScale: 1))
         XCTAssertFalse(CharacterPhysics.overlaps(position: .zero, bounds: bounds, scale: 1, otherPosition: [0.3, 0, 0], otherBounds: bounds, otherScale: 1))
         XCTAssertTrue(CharacterPhysics.overlaps(position: .zero, bounds: bounds, scale: 2, otherPosition: [0.3, 0, 0], otherBounds: bounds, otherScale: 1))
         XCTAssertFalse(CharacterPhysics.overlaps(position: .zero, bounds: bounds, scale: 1, otherPosition: [0, 0.5, 0], otherBounds: bounds, otherScale: 1))
@@ -216,6 +222,14 @@ final class CommandTests: XCTestCase {
         XCTAssertEqual(after.x - before.x, 0.3, accuracy: 0.002)
         XCTAssertEqual(after.y, before.y, accuracy: 0.0001)
         XCTAssertEqual(root.physicsBody?.mode, .kinematic)
+    }
+
+    @MainActor func testSupportRecoveryAllowsJumpButCatchesSmallFall() {
+        let safe = SIMD3<Float>(0.4, 0.7, -0.2)
+        XCTAssertFalse(CharacterPhysics.needsSupportRecovery(position: safe + [0, 0.15, 0], safePosition: safe))
+        XCTAssertFalse(CharacterPhysics.needsSupportRecovery(position: safe - [0, 0.02, 0], safePosition: safe))
+        XCTAssertTrue(CharacterPhysics.needsSupportRecovery(position: safe - [0, 0.09, 0], safePosition: safe))
+        XCTAssertTrue(CharacterPhysics.needsSupportRecovery(position: [.nan, 0, 0], safePosition: safe))
     }
 
     @MainActor func testWalkingControllerReachesDestinationWithoutOvershooting() {
@@ -294,4 +308,25 @@ final class CommandTests: XCTestCase {
         roster[1].name = ""
         XCTAssertFalse(CommandValidation.validNames(roster))
     }
+    func testWalkResolvesToRouteOrDirectedMovement() {
+        let id = CastCharacter.defaults[0].id
+        let roam = CharacterCommand(characterIDs: [id], action: "walk", direction: nil, distance: nil, speech: nil)
+        XCTAssertNil(CommandValidation.error(for: roam, roster: CastCharacter.defaults))
+        XCTAssertEqual(roam.resolvedMovement.action, "explore")
+        let directed = CharacterCommand(characterIDs: [id], action: "walk", direction: "right", distance: nil, speech: "happy")
+        XCTAssertNil(CommandValidation.error(for: directed, roster: CastCharacter.defaults))
+        XCTAssertEqual(directed.resolvedMovement.action, "move")
+        XCTAssertEqual(directed.resolvedMovement.direction, "right")
+        XCTAssertEqual(directed.resolvedMovement.distance, 0.15)
+        XCTAssertEqual(directed.resolvedMovement.speech, "happy")
+    }
+
+    func testWalkStillRejectsInvalidDirectionAndDistance() {
+        let id = CastCharacter.defaults[0].id
+        for (direction, distance): (String?, Float?) in [("up", nil), ("right", 20), (nil, -.infinity), ("left", .nan)] {
+            let command = CharacterCommand(characterIDs: [id], action: "walk", direction: direction, distance: distance, speech: nil)
+            XCTAssertNotNil(CommandValidation.error(for: command, roster: CastCharacter.defaults))
+        }
+    }
+
 }

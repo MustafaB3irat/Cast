@@ -29,7 +29,18 @@ struct ContentView: View {
                 .padding(.horizontal, 16).padding(.vertical, 4)
                 .background(.regularMaterial, in: Capsule())
                 Spacer()
-                if scene.selectedID != nil {
+                if let id = scene.pendingSavedID, let character = scene.roster.first(where: { $0.id == id }) {
+                    HStack {
+                        CharacterPortrait(character: character).frame(width: 48, height: 48)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Place \(character.name)").font(.headline)
+                            Text(scene.status).font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Cancel") { scene.cancelSavedPlacement() }
+                    }
+                    .padding(16).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 28))
+                } else if scene.selectedID != nil {
                     PlacementControls(scene: scene, voice: voice, adjust: { showAdjustment = true }, edit: {
                         editingCharacter = scene.roster.first { $0.id == scene.selectedID }
                     })
@@ -54,7 +65,8 @@ struct ContentView: View {
             NavigationStack {
                 Form {
                     LabeledContent("Size", value: String(format: "%.2f×", scene.selectedScale))
-                    Slider(value: Binding(get: { scene.selectedScale }, set: { scene.setScale($0) }), in: 0.25...3).accessibilityLabel("Character size")
+                    Slider(value: Binding(get: { scene.selectedScale }, set: { scene.setScale($0) }), in: CharacterPhysics.scaleRange).accessibilityLabel("Character size")
+                    if let feedback = scene.scaleFeedback { Text(feedback).font(.caption).foregroundStyle(.secondary) }
                     LabeledContent("Rotation", value: String(format: "%.0f°", scene.selectedRotation))
                     Slider(value: Binding(get: { scene.selectedRotation }, set: { scene.setRotation($0) }), in: -360...360).accessibilityLabel("Character rotation")
                 }.navigationTitle(scene.selectedName)
@@ -86,6 +98,7 @@ struct ContentView: View {
             voice.scene = { [weak stageController] in stageController?.snapshot() ?? "{}" }
             voice.playEnabled = { [weak stageController] in stageController?.isPlaying ?? false }
             voice.executeScene = { [weak stageController] command in stageController?.executeAutonomous(command) ?? "Scene unavailable" }
+            voice.commandReady = { [weak stageController] command in stageController?.voiceCommandReady(command) ?? false }
             voice.execute = { [weak stageController] command in stageController?.execute(command) ?? "Scene unavailable" }
             scene.speak = { [weak voiceController] mood, character, expression in voiceController?.react(mood, character: character, expression: expression) }
             scene.sceneEvent = { [weak voiceController] event in voiceController?.observeScene(event) }
@@ -125,7 +138,7 @@ struct ConnectionSettings: View {
                 }
                 Section {
                     Text("Personal prototype: your key is stored in this device’s Keychain and sent only to OpenAI. Live sessions use gpt-realtime-2.1 and end after five minutes or when you leave the app. API usage is billed to your OpenAI project.")
-                    Text("Voice commands use OpenAI. Characters answer with their own little hums, chirps and robotic sounds, generated on your iPhone. They never speak words. The microphone pauses during their sounds. Stop always works locally.")
+                    Text("Voice commands use OpenAI. Characters answer with their own little hums, chirps and robotic sounds, generated on your iPhone. They never speak words. You can interrupt their sounds with a new voice command. Stop always works locally.")
                 }
             }
             .navigationTitle("Connection")

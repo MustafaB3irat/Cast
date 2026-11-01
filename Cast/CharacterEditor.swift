@@ -18,6 +18,15 @@ struct CharacterEditor: View {
     @State private var editing: CastCharacter?
     @State private var deleting: CastCharacter?
 
+    private func activate(_ character: CastCharacter) {
+        if scene.placedRoster.contains(where: { $0.id == character.id }) {
+            scene.select(character.id)
+        } else {
+            scene.prepareSavedPlacement(character.id)
+        }
+        dismiss()
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -30,15 +39,26 @@ struct CharacterEditor: View {
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 152), spacing: 16)], spacing: 16) {
                             ForEach(scene.roster) { character in
                                 VStack(spacing: 0) {
-                                    Button { editing = character } label: {
+                                    Button { activate(character) } label: {
                                         VStack(spacing: 8) {
-                                            CharacterPortrait(character: character)
-                                                .frame(height: 144).scaleEffect(1.2).accessibilityHidden(true)
+                                            AnimatedCharacterPortrait(character: character)
+                                                .frame(height: 144).accessibilityHidden(true)
                                             Text(character.name).font(.title3.weight(.semibold)).foregroundStyle(.primary)
                                             Text(scene.placedRoster.contains(where: { $0.id == character.id }) ? "In your scene" : "Ready to join")
                                                 .font(.caption).foregroundStyle(.secondary)
                                         }.frame(maxWidth: .infinity).padding(.top, 16).padding(.horizontal, 12)
-                                    }.buttonStyle(.plain).accessibilityLabel("Edit " + character.name)
+                                    }.buttonStyle(.plain).accessibilityLabel("Choose " + character.name)
+                                    Button(scene.placedRoster.contains(where: { $0.id == character.id }) ? "Select" : "Place", systemImage: "hand.tap") {
+                                        activate(character)
+                                    }
+                                    .buttonStyle(.borderedProminent).padding(.top, 12)
+                                    if scene.placedRoster.contains(where: { $0.id == character.id }) {
+                                        Button("New spot", systemImage: "arrow.up.and.down.and.arrow.left.and.right") {
+                                            scene.select(character.id)
+                                            scene.beginMove()
+                                            dismiss()
+                                        }.buttonStyle(.bordered).padding(.top, 8)
+                                    }
                                     HStack {
                                         Button("Edit", systemImage: "pencil") { editing = character }.font(.caption)
                                         Spacer()

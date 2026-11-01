@@ -14,6 +14,7 @@ struct CastCamera: UIViewRepresentable {
     @Published var status = "Empty scene"
     @Published var isPlaced = false
     @Published var tracking = false
+    @Published private(set) var perceptionStatus = "Depth unavailable"
     @Published private(set) var isPlaying = false
     var usesLiveDirector = false
     private(set) var autonomyRevision = 0
@@ -23,8 +24,10 @@ struct CastCamera: UIViewRepresentable {
     @Published var showingSpawn = false
     @Published var selectedID: UUID?
     @Published var selectedScale: Float = 1
+    @Published private(set) var scaleFeedback: String?
     @Published var selectedRotation: Float = 0
     @Published var movingSelection = false
+    @Published private(set) var pendingSavedID: UUID?
     private var pendingPosition: SIMD3<Float>?
     private var dragTarget: UUID?
     private var dragOffset = SIMD3<Float>.zero
@@ -44,6 +47,9 @@ struct CastCamera: UIViewRepresentable {
     private var lastCollisionSound: TimeInterval = 0
     private var previousTime: TimeInterval?
     private var movementDeltaTime: Float = 1 / 60
+    private var lastDepthObservation: TimeInterval = 0
+    private var latestDepthTime: TimeInterval = -.infinity
+    private var depthPoints: [SIMD3<Float>] = []
 
     @MainActor private final class Actor {
         let root: ModelEntity
@@ -58,6 +64,12 @@ struct CastCamera: UIViewRepresentable {
         var travelSpeed: Float = 0
         var stalledTime: Float = 0
         var walking = false
+        var reflex = ProximityReflex()
+        var reflexUntil: TimeInterval = 0
+        var travelledDistance: Float = 0
+        var recovery = SupportRecovery()
+        var detourGoal: SIMD3<Float>?
+        var usedDetour = false
         var suspended = false
         var target: SIMD3<Float>?
         var action = "idle"
@@ -124,6 +136,12 @@ struct CastCamera: UIViewRepresentable {
         let config = ARWorldTrackingConfiguration()
         config.planeDetection = [.horizontal, .vertical]
         config.environmentTexturing = .automatic
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+            config.frameSemantics.insert(.sceneDepth)
+            perceptionStatus = "Depth warming up"
+        }
+        let people = config.frameSemantics.union(.personSegmentationWithDepth)
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(people) { config.frameSemantics = people }
         // A soft camera-relative fill keeps faces readable in dim rooms. Offset the
         // direction so the avatars retain shape instead of looking evenly unlit.
         let fillAnchor = AnchorEntity(.camera)
@@ -204,6 +222,12 @@ struct CastCamera: UIViewRepresentable {
     @objc private func tap(_ recognizer: UITapGestureRecognizer) {
         guard let view else { return }
         let point = recognizer.location(in: view)
+        if let id = pendingSavedID {
+            guard let position = surfacePosition(at: point) else { return }
+            pendingPosition = position
+            if spawnSaved(id) { pendingSavedID = nil }
+            return
+        }
         if movingSelection {
             if let position = surfacePosition(at: point), let id = selectedID, let actor = actors[id] {
                 guard reposition(actor, to: position) else { return }
@@ -219,6 +243,21 @@ struct CastCamera: UIViewRepresentable {
     }
 
     func cancelSpawn() { pendingPosition = nil; showingSpawn = false }
+
+    func prepareSavedPlacement(_ id: UUID) {
+        guard roster.contains(where: { $0.id == id }), actors[id] == nil else { return }
+        stopAll()
+        deselect()
+        cancelSpawn()
+        pendingSavedID = id
+        status = "Choose a spot"
+    }
+
+    func cancelSavedPlacement() {
+        pendingSavedID = nil
+        pendingPosition = nil
+        status = "Ready"
+    }
 
     func spawnSaved(_ id: UUID) -> Bool {
         guard let character = roster.first(where: { $0.id == id }), actors[id] == nil else { return false }
@@ -274,9 +313,11 @@ struct CastCamera: UIViewRepresentable {
 
     func select(_ id: UUID) {
         guard let actor = actors[id] else { return }
+        pendingSavedID = nil
         stopAll()
         if let previous = selectedID, let old = actors[previous], previous != id { setDynamic(old) }
         selectedID = id
+        scaleFeedback = nil
         updateSelectionIndicators()
         setMode(actor, to: .kinematic)
         actor.root.physicsMotion = PhysicsMotionComponent()
@@ -295,8 +336,13 @@ struct CastCamera: UIViewRepresentable {
     func beginMove() { stopAll(); movingSelection = true; status = "Moving \(selectedName)" }
     func setScale(_ value: Float) {
         guard value.isFinite, let id = selectedID, let actor = actors[id] else { return }
-        let scale = min(3, max(0.25, value))
-        guard scale < actor.root.scale.x || hasRoom(for: actor, at: actor.root.position, scale: scale) else { status = "Move this character away from the others before enlarging it."; return }
+        let scale = min(CharacterPhysics.scaleRange.upperBound, max(CharacterPhysics.scaleRange.lowerBound, value))
+        guard scale <= actor.root.scale.x || hasRoom(for: actor, at: actor.root.position, scale: scale) else {
+            scaleFeedback = "More space needed. Move away from nearby characters or surfaces."
+            status = scaleFeedback!
+            return
+        }
+        scaleFeedback = value > CharacterPhysics.scaleRange.upperBound ? "Maximum size · 10×" : nil
         selectedScale = scale
         actor.root.scale = SIMD3(repeating: scale)
         CharacterPhysics.configure(actor.root, bounds: actor.bodyBounds, scale: scale, mode: .kinematic)
@@ -310,6 +356,7 @@ struct CastCamera: UIViewRepresentable {
         actor.root.orientation = simd_quatf(angle: selectedRotation * .pi / 180, axis: [0, 1, 0])
     }
     func removeCharacter(_ id: UUID) {
+        if pendingSavedID == id { cancelSavedPlacement() }
         stopAll()
         if selectedID == id { deselect() }
         actors.removeValue(forKey: id)?.root.removeFromParent()
@@ -418,7 +465,8 @@ struct CastCamera: UIViewRepresentable {
         stage?.removeFromParent(); stage = nil
         actors.removeAll(); isPlaced = false
         awareness = SceneAwareness()
-        deselect(); cancelSpawn()
+        depthPoints = []; latestDepthTime = -.infinity
+        deselect(); cancelSpawn(); cancelSavedPlacement()
         status = "Empty scene"
     }
 
@@ -494,12 +542,18 @@ struct CastCamera: UIViewRepresentable {
                     "action": actor?.action ?? "not placed", "asset": c.assetFilename == nil ? "stand-in" : "imported"]
         }
         let state: [String: Any] = ["placed": isPlaced, "tracking": tracking, "play_enabled": isPlaying, "maximum_move_metres": 0.4, "characters": info,
+                                    "local_perception": perceptionStatus,
                                     "geometry": "rigid body collisions against other characters and reconstructed room geometry; scanned support checked before walking; no general pathfinding"]
         return (try? JSONSerialization.data(withJSONObject: state)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
     }
 
+    func voiceCommandReady(_ command: CharacterCommand) -> Bool {
+        command.characterIDs.allSatisfy { actors[$0]?.action == "idle" }
+    }
+
     func execute(_ command: CharacterCommand) -> String {
         if let error = CommandValidation.error(for: command, roster: roster) { return error }
+        let command = command.resolvedMovement
         if command.action == "stop" { stopAll(); return "Stopped" }
         guard isPlaced, tracking, let stage, let frame = view?.session.currentFrame else { return "Place the cast and restore tracking first" }
         guard !movingSelection else { return "Finish repositioning the selected character first" }
@@ -514,6 +568,8 @@ struct CastCamera: UIViewRepresentable {
             guard selected.allSatisfy({ hasRoom(for: $0, at: $0.root.position + [0, 0.1, 0], scale: $0.root.scale.x) }) else { return "There isn’t enough space above the character to jump" }
         }
         for actor in selected {
+            actor.reflexUntil = 0
+            actor.travelledDistance = 0
             finishWalking(actor)
             actor.animator.reset()
             actor.model.transform = .identity
@@ -523,7 +579,7 @@ struct CastCamera: UIViewRepresentable {
             actor.started = now
         }
         // A fresh instruction supersedes previous destinations for its participants.
-        for actor in selected { actor.target = nil; actor.meetingPartner = nil; actor.sparPartner = nil }
+        for actor in selected { actor.detourGoal = nil; actor.usedDetour = false; actor.target = nil; actor.meetingPartner = nil; actor.sparPartner = nil }
         if command.action == "meet" {
             let a = selected[0], b = selected[1]
             let spacing = meetingDistance(a, b)
@@ -609,9 +665,9 @@ struct CastCamera: UIViewRepresentable {
     }
 
     func executeAutonomous(_ command: CharacterCommand) -> String {
-        guard selectedID == nil, !showingSpawn, !movingSelection,
+        guard selectedID == nil, pendingSavedID == nil, !showingSpawn, !movingSelection,
               actors.values.allSatisfy({ !$0.suspended }),
-              command.characterIDs.allSatisfy({ actors[$0]?.action == "idle" }),
+              command.characterIDs.allSatisfy({ actors[$0]?.action == "idle" && (actors[$0]?.reflexUntil ?? 0) < (view?.session.currentFrame?.timestamp ?? 0) }),
               InteractionRules.allows([command], playing: isPlaying) else {
             return "Interaction paused while editing or Play is off"
         }
@@ -740,7 +796,10 @@ struct CastCamera: UIViewRepresentable {
         autonomyRevision += 1
         autonomyInterrupted?()
         isPlaying = false
+        depthPoints = []; latestDepthTime = -.infinity
         for actor in actors.values {
+            actor.detourGoal = nil; actor.usedDetour = false
+            actor.reflex = ProximityReflex(); actor.reflexUntil = 0
             finishWalking(actor)
             actor.root.physicsMotion = PhysicsMotionComponent()
             actor.sparPartner = nil
@@ -807,6 +866,7 @@ struct CastCamera: UIViewRepresentable {
         actor.root.physicsMotion = PhysicsMotionComponent()
         actor.root.setPosition(position + [0, 0.008, 0], relativeTo: nil)
         actor.suspended = false
+        actor.recovery = SupportRecovery()
         actor.home = actor.root.position
         return true
     }
@@ -831,6 +891,95 @@ struct CastCamera: UIViewRepresentable {
         }
     }
 
+    private func actorRadius(_ actor: Actor) -> Float {
+        simd_length(SIMD2(actor.bodyBounds.extents.x, actor.bodyBounds.extents.z)) * actor.root.scale.x / 2
+    }
+
+    private func depthRouteClear(_ actor: Actor, to end: SIMD3<Float>) -> Bool {
+        guard let frame = view?.session.currentFrame, frame.timestamp - latestDepthTime < 0.35, let stage else { return true }
+        return ProximityReflex.routeClear(points: depthPoints, start: actor.root.position(relativeTo: nil),
+            end: stage.convert(position: end, to: nil), radius: actorRadius(actor), height: actor.bodyBounds.extents.y * actor.root.scale.x)
+    }
+
+    private func updateDepthAwareness(_ frame: ARFrame) {
+        guard frame.timestamp - lastDepthObservation >= 0.1 else { return }
+        lastDepthObservation = frame.timestamp
+        guard let points = DepthAwareness.points(frame: frame), !points.isEmpty else {
+            depthPoints = []; latestDepthTime = -.infinity
+            for actor in actors.values { actor.reflex = ProximityReflex() }
+            if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) { perceptionStatus = "Depth temporarily unavailable" }
+            return
+        }
+        depthPoints = points; latestDepthTime = frame.timestamp
+        if perceptionStatus != "Depth sensing active" { perceptionStatus = "Depth sensing active" }
+        guard isPlaying, selectedID == nil, !showingSpawn, !movingSelection, let stage else { return }
+        for (id, actor) in actors where !actor.suspended {
+            let feet = actor.root.position(relativeTo: nil), radius = actorRadius(actor)
+            let nearby = ProximityReflex.nearestCluster(points: points, feet: feet,
+                height: actor.bodyBounds.extents.y * actor.root.scale.x, radius: radius)
+            guard let threat = actor.reflex.observe(point: nearby, actor: feet, radius: radius, now: frame.timestamp),
+                  frame.timestamp > actor.reflexUntil else { continue }
+            autonomyRevision += 1; autonomyInterrupted?()
+            finishWalking(actor); brake(actor); actor.animator.reset()
+            actor.target = nil; actor.meetingPartner = nil; actor.sparPartner = nil
+            actor.started = frame.timestamp; actor.travelledDistance = 0
+            actor.reflexUntil = frame.timestamp + 2.5
+            var away = SIMD3<Float>(feet.x - threat.point.x, 0, feet.z - threat.point.z)
+            if simd_length(away) < 0.001 { away = [1, 0, 0] }
+            away = simd_normalize(away)
+            var escape: SIMD3<Float>?
+            for angle: Float in [0, .pi / 4, -.pi / 4, .pi / 2, -.pi / 2] {
+                let direction = simd_quatf(angle: angle, axis: [0, 1, 0]).act(away)
+                for distance: Float in [0.22, 0.12, 0.08] {
+                    let local = stage.convert(position: feet + direction * distance, from: nil)
+                    if supportedPath(from: actor.root.position, to: local),
+                       hasRoom(for: actor, at: local, scale: actor.root.scale.x), depthRouteClear(actor, to: local) {
+                        escape = local; break
+                    }
+                }
+                if escape != nil { break }
+            }
+            let name = roster.first { $0.id == id }?.name ?? "Character"
+            if let escape {
+                actor.detourGoal = nil; actor.usedDetour = false
+                actor.target = escape; actor.action = "move"; actor.ends = frame.timestamp + 2
+                status = "\(name) is making room"
+            } else {
+                actor.action = "startle"; actor.ends = frame.timestamp + 1.2
+                face(actor, toward: stage.convert(position: threat.point, from: nil))
+                status = "\(name) noticed something close"
+            }
+            if let character = roster.first(where: { $0.id == id }) { speak?("confused", character, .neutral) }
+            sceneEvent?("Local reflex: character " + id.uuidString + (escape == nil ? " flinched; no clear escape route." : " is stepping away from approaching depth geometry.") + " This is an obstacle estimate, not an identified person. React after the character settles.")
+        }
+    }
+
+    private func routeClear(_ actor: Actor, from start: SIMD3<Float>, to end: SIMD3<Float>) -> Bool {
+        guard supportedPath(from: start, to: end), let stage else { return false }
+        if (view?.session.currentFrame?.timestamp ?? 0) - latestDepthTime < 0.35,
+           !ProximityReflex.routeClear(points: depthPoints, start: stage.convert(position: start, to: nil),
+                                       end: stage.convert(position: end, to: nil), radius: actorRadius(actor),
+                                       height: actor.bodyBounds.extents.y * actor.root.scale.x) { return false }
+        let steps = max(1, Int(ceil(simd_distance(start, end) / 0.02)))
+        for step in 0...steps {
+            if !hasRoom(for: actor, at: start + (end - start) * Float(step) / Float(steps), scale: actor.root.scale.x) { return false }
+        }
+        return true
+    }
+
+    private func tryDetour(_ actor: Actor, to goal: SIMD3<Float>, now: TimeInterval) -> Bool {
+        guard !actor.usedDetour, actor.reflexUntil <= now,
+              let waypoint = NavigationRecovery.detour(from: actor.root.position, to: goal, radius: actorRadius(actor),
+                clear: { self.routeClear(actor, from: $0, to: $1) }) else { return false }
+        actor.usedDetour = true
+        actor.detourGoal = goal
+        actor.target = waypoint
+        actor.ends = max(actor.ends, now + 5)
+        actor.lastPathCheck = now
+        status = "Taking another route"
+        return true
+    }
+
     private func finishWalking(_ actor: Actor) {
         guard actor.walking else { return }
         actor.walking = false
@@ -841,14 +990,25 @@ struct CastCamera: UIViewRepresentable {
     /// Each step is at most 9 mm; collision clearance and scanned support gate every advance.
     private func walk(_ actor: Actor, toward target: SIMD3<Float>) -> Bool {
         let next = CharacterPhysics.walkingStep(from: actor.root.position, toward: target, deltaTime: movementDeltaTime)
-        guard supportedPath(from: actor.root.position, to: next),
-              hasRoom(for: actor, at: next, scale: actor.root.scale.x) else { return false }
+        guard supportedPath(from: actor.root.position, to: next) else {
+            status = "Walking stopped: route has no clear scanned floor support"; return false
+        }
+        guard depthRouteClear(actor, to: next) else {
+            status = "Walking stopped: depth sensor sees an obstacle"; return false
+        }
+        guard environmentHasRoom(actor, at: next, scale: actor.root.scale.x) else {
+            status = "Walking stopped: room geometry blocks the character"; return false
+        }
+        guard hasRoom(for: actor, at: next, scale: actor.root.scale.x) else {
+            status = "Walking stopped: another character is too close"; return false
+        }
         if !actor.walking {
             setMode(actor, to: .kinematic)
             actor.root.physicsMotion = PhysicsMotionComponent()
             actor.walking = true
         }
         actor.root.position = next
+        actor.home = next // latest supported location, not the original spawn point
         return true
     }
 
@@ -878,16 +1038,18 @@ struct CastCamera: UIViewRepresentable {
         sceneEvent?("Physical contact involving character IDs: " + participants.keys.map(\.uuidString).joined(separator: ", "))
     }
 
-    // LiDAR devices use RealityKit's reconstructed mesh. Other devices use the
-    // detected plane boundary, extruded downward to make a finite static body.
+    // Keep detected horizontal support on LiDAR too. People occlusion can carve
+    // a temporary hole in the reconstructed mesh underneath an otherwise valid floor.
+    // Finite plane boundaries preserve support without inventing an infinite floor.
     func session(_ session: ARSession, didAdd anchors: [ARAnchor]) { updatePlaneBodies(anchors) }
     func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) { updatePlaneBodies(anchors) }
     func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {
         for anchor in anchors { planeBodies.removeValue(forKey: anchor.identifier)?.removeFromParent() }
     }
     private func updatePlaneBodies(_ anchors: [ARAnchor]) {
-        guard !ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh), let view else { return }
+        guard let view else { return }
         for case let plane as ARPlaneAnchor in anchors {
+            if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh), plane.alignment != .horizontal { continue }
             let geometry = plane.geometry
             guard geometry.boundaryVertices.count >= 3 else { continue }
             var points: [SIMD3<Float>] = []
@@ -924,6 +1086,7 @@ struct CastCamera: UIViewRepresentable {
         movementDeltaTime = min(0.05, max(0.001, Float(frame.timestamp - (previousTime ?? frame.timestamp - 1 / 60))))
         previousTime = frame.timestamp
         guard normal else { return }
+        updateDepthAwareness(frame)
         if frame.timestamp - lastObservation >= 1, selectedID == nil, !showingSpawn, !actors.isEmpty {
             lastObservation = frame.timestamp
             let cp = frame.camera.transform.columns.3
@@ -952,23 +1115,46 @@ struct CastCamera: UIViewRepresentable {
             let t = Float(frame.timestamp - actor.started)
             let travelled = actor.root.position - (actor.lastPosition ?? actor.root.position)
             actor.lastPosition = actor.root.position
+            if actor.action == "move" { actor.travelledDistance += simd_length(SIMD2(travelled.x, travelled.z)) }
             let speed = simd_length(SIMD2(travelled.x, travelled.z)) / movementDeltaTime
             actor.travelSpeed += (speed - actor.travelSpeed) * min(1, movementDeltaTime * 12)
             if actor.action != "idle", frame.timestamp > actor.ends { finishWalking(actor); actor.action = "idle"; actor.target = nil; actor.model.position = .zero; actor.model.orientation = simd_quatf(); actor.animator.reset() }
-            guard id != selectedID, !actor.suspended else { continue }
-            // An incomplete scan can have holes. Recover instead of letting an avatar disappear.
-            if actor.root.position.y < actor.home.y - 1 {
+            guard id != selectedID else { continue }
+            if actor.suspended {
+                let supported = grounded(actor) && hasRoom(for: actor, at: actor.root.position, scale: actor.root.scale.x)
+                    && depthRouteClear(actor, to: actor.root.position)
+                if actor.recovery.observe(supported: supported, now: frame.timestamp) {
+                    actor.suspended = false
+                    actor.home = actor.root.position
+                    actor.lastPosition = actor.root.position
+                    setDynamic(actor)
+                    autonomyRevision += 1
+                    status = "Surface recovered"
+                }
+                continue
+            }
+            // Recover near the latest supported position, before a mesh hole hides the avatar.
+            if CharacterPhysics.needsSupportRecovery(position: actor.root.position, safePosition: actor.home) {
                 setMode(actor, to: .kinematic)
                 actor.root.physicsMotion = PhysicsMotionComponent()
                 actor.root.position = actor.home + [0, 0.01, 0]
                 actor.suspended = true
-                actor.action = "idle"; actor.target = nil
-                status = "Surface scan incomplete. Select and reposition the character."
+                actor.detourGoal = nil
+                actor.walking = false; actor.action = "idle"; actor.target = nil
+                actor.meetingPartner = nil; actor.sparPartner = nil
+                actor.animator.reset(); actor.model.transform = .identity
+                autonomyRevision += 1; autonomyInterrupted?()
+                status = "Surface changed. Character held at its last safe spot."
                 continue
             }
             if let target = actor.target {
                 let delta = target - actor.root.position
                 if simd_length(SIMD2(delta.x, delta.z)) < 0.012 {
+                    if let goal = actor.detourGoal {
+                        actor.detourGoal = nil
+                        actor.target = goal
+                        continue
+                    }
                     finishWalking(actor)
                     actor.target = nil; actor.action = "idle"; brake(actor)
                     if let partnerID = actor.meetingPartner, let other = actors[partnerID],
@@ -981,6 +1167,7 @@ struct CastCamera: UIViewRepresentable {
                     if frame.timestamp - actor.lastPathCheck > 0.3 {
                         actor.lastPathCheck = frame.timestamp
                         if !supportedPath(from: actor.root.position, to: target) {
+                            if tryDetour(actor, to: target, now: frame.timestamp) { continue }
                             finishWalking(actor)
                             actor.target = nil; actor.meetingPartner = nil; actor.action = "idle"; actor.animator.reset(); brake(actor)
                             status = "Walking stopped: surface support lost"
@@ -988,12 +1175,14 @@ struct CastCamera: UIViewRepresentable {
                             continue
                         }
                     }
-                    face(actor, toward: target)
+                    let delta = target - actor.root.position
+                    let yaw = simd_quatf(angle: atan2(delta.x, delta.z), axis: [0, 1, 0])
+                    actor.root.orientation = simd_slerp(actor.root.orientation, yaw, min(1, movementDeltaTime * 10))
                     if !walk(actor, toward: target) {
+                        if tryDetour(actor, to: target, now: frame.timestamp) { continue }
                         finishWalking(actor)
                         actor.target = nil; actor.meetingPartner = nil; actor.action = "idle"
                         actor.animator.reset(); brake(actor)
-                        status = "Walking stopped: path blocked or surface missing"
                         sceneEvent?("Character " + id.uuidString + " stopped at an obstacle or unsupported surface.")
                         continue
                     }
@@ -1001,6 +1190,7 @@ struct CastCamera: UIViewRepresentable {
             }
             let visibleAction = actor.action == "move" && actor.travelSpeed < 0.008 ? "idle" : actor.action
             actor.animator.update(action: visibleAction, time: t, duration: Float(actor.ends - actor.started))
+            if visibleAction == "move" { actor.animator.synchronizeWalk(distance: actor.travelledDistance) }
             switch actor.action {
             case "wave": actor.model.orientation = simd_quatf(angle: sin(t * 6) * 0.08, axis: [0, 0, 1])
             case "jump": break

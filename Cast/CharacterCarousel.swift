@@ -20,8 +20,7 @@ struct CharacterCarousel: View {
                             withAnimation(reduceMotion ? nil : .smooth(duration: 0.32)) { selection = look.id }
                         } label: {
                             VStack(spacing: 8) {
-                                Image(look.preview)
-                                    .resizable().scaledToFit()
+                                AnimatedCharacterPortrait(character: CastCharacter(name: look.id, personality: "", assetFilename: "bundle:" + look.id, colour: 0), animated: selection == look.id)
                                     .padding(.horizontal, 8)
                                     .frame(height: 248)
                                     .accessibilityHidden(true)
@@ -128,7 +127,7 @@ struct SpawnCharacterSheet: View {
                                             }
                                         } label: {
                                             VStack(spacing: 8) {
-                                                savedPortrait(character).frame(width: 64, height: 64)
+                                                AnimatedCharacterPortrait(character: character, animated: savedID == character.id).frame(width: 64, height: 64)
                                                 Text(character.name).font(.caption).lineLimit(1)
                                             }
                                             .frame(width: 80).padding(8)

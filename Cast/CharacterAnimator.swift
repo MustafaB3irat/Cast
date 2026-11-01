@@ -69,6 +69,15 @@ import simd
         }
     }
 
+    func synchronizeWalk(distance: Float) {
+        guard currentAction == "move", distance.isFinite else { return }
+        // One gait cycle per ~9.4 cm, driven by actual root displacement.
+        for controller in playback {
+            controller.speed = 0
+            controller.time = Double(0.30 + (distance / 0.18).truncatingRemainder(dividingBy: .pi / 6))
+        }
+    }
+
     // Also exposed internally for deterministic pose validation against the imported assets.
     func applyPose(action: String, time: Float, duration: Float) {
         for rig in rigs { rig.entity.jointTransforms = pose(rig, action: action, time: time, duration: duration) }
@@ -84,6 +93,9 @@ import simd
                 var angle: Float = 0
                 var axis = SIMD3<Float>(1, 0, 0)
                 switch action {
+                case "startle":
+                    if name.hasPrefix("arm_upper") { angle = side * 0.8; axis = [0, 0, 1] }
+                    if name == "body_mid" { angle = -0.2 }
                 case "wave":
                     if name == "arm_upper_r" { angle = -1.7; axis = [0, 0, 1] }
                     if name == "arm_lower_r" { angle = -0.5 + sin(time * 12) * 0.45; axis = [0, 0, 1] }

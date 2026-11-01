@@ -35,14 +35,28 @@ struct CharacterCommand: Codable {
 
 struct CommandBatch: Codable { let actions: [CharacterCommand] }
 
+extension CharacterCommand {
+    /// Natural walking without a direction chooses a scanned route; directed walking is a bounded move.
+    var resolvedMovement: CharacterCommand {
+        guard action == "walk" else { return self }
+        return CharacterCommand(characterIDs: characterIDs, action: direction == nil ? "explore" : "move",
+                                direction: direction, distance: direction == nil ? nil : (distance ?? 0.15),
+                                speech: speech, expression: expression)
+    }
+}
+
 enum CommandValidation {
-    static let actions = ["move", "wave", "jump", "dance", "face_each_other", "spar", "speak", "stop", "meet", "explore", "inspect"]
+    static let actions = ["walk", "move", "wave", "jump", "dance", "face_each_other", "spar", "speak", "stop", "meet", "explore", "inspect"]
     static let directions = ["left", "right", "forward", "back"]
     static func error(for command: CharacterCommand, roster: [CastCharacter]) -> String? {
         guard actions.contains(command.action) else { return "Unsupported action" }
         guard !command.characterIDs.isEmpty, command.characterIDs.count <= roster.count,
               Set(command.characterIDs).count == command.characterIDs.count,
               command.characterIDs.allSatisfy({ id in roster.contains { $0.id == id } }) else { return "Unknown or duplicate character" }
+        if command.action == "walk" {
+            if let distance = command.distance, !distance.isFinite || distance <= 0 || distance > 0.4 { return "Walking distance must be between 0 and 0.4 metres" }
+            return error(for: command.resolvedMovement, roster: roster)
+        }
         if command.action == "move" {
             guard let direction = command.direction, directions.contains(direction),
                   let distance = command.distance, distance.isFinite, distance > 0, distance <= 0.4 else {

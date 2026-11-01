@@ -41,7 +41,7 @@ enum CharacterVoice {
             }
             output += Array(repeating: 0, count: 840)
         }
-        // Tail keeps microphone capture paused briefly after the last audible sound.
+        // Short silent tail gives each sound a clean ending.
         output += Array(repeating: 0, count: 3600)
         return output
     }

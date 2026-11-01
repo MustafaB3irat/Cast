@@ -25,6 +25,16 @@ Built for the [DevDay Exchange Community Hackathon, London](https://luma.com/dde
 
 The characters make nonverbal sounds, not spoken dialogue. Their names and personalities persist; their AR placements currently do not.
 
+## Current build: 33
+
+- Animated 3D previews in the picker and Your cast, respecting Reduce Motion.
+- Select, relocate or place saved characters; pinch/slider sizing from 0.25× to 10×.
+- A stable Live indicator with detailed status, approximate voice transcription and command outcomes in Activity.
+- Voice commands wait for completed model responses; overlapping actions run in order and new speech/Stop cancels queued work. “Walk” chooses a short scanned route; “walk right” defaults to 15 cm.
+- Bounded detours and support-loss recovery supplement the local depth reflexes. Physical perception remains experimental.
+
+The author confirmed voice actions and walking on build 32. Build 33 adds explicit walking-command mapping and clearer route diagnostics; it builds and passes the 46-test suite, with further device testing documented below.
+
 ## Demo and submission
 
 The ≤90-second physical-device demo is being finished separately. This repository does not yet contain the final video. [Submission copy and demo checklist](docs/SUBMISSION.md) are included; do not mistake a simulator preview for a live AR demonstration.
@@ -34,11 +44,12 @@ The ≤90-second physical-device demo is being finished separately. This reposit
 | Layer | Implementation |
 | --- | --- |
 | Spoken direction | OpenAI Realtime (`gpt-realtime-2.1`) receives microphone audio and calls a structured action tool with stable character IDs. |
+| Voice diagnostics | Input transcription (`gpt-4o-mini-transcribe`) appears in Activity alongside local action results; this is an approximate transcript, not proof of what Realtime interpreted. |
 | Autonomous choices | `POST /v1/decisions`, `gpt-6-luna`, selects from scene-generated choices such as wave, explore, inspect, jump, dance or greet. |
 | Execution | Local validation rejects unknown targets, invalid parameters, stale decisions and unavailable actions. ARKit/RealityKit controls placement and movement. |
 | Character sounds | On-device synthesis generates short hums and chirps, with model-selected mood and bounded expression. No TTS call is needed. |
 
-Decisions uses measured geometry, proximity, lighting changes and recent actions. One request may be in flight, with a four-second minimum interval and error backoff. Voice input takes priority. This is **not visual recognition of everything in the room**: no camera images are sent to OpenAI, and approaching-person avoidance is not implemented.
+Decisions uses measured geometry, proximity, lighting changes and recent actions. One request may be in flight, with a four-second minimum interval and error backoff. Voice input takes priority. This is **not visual recognition of everything in the room**: no camera images are sent to OpenAI, and the app includes experimental local avoidance of approaching depth geometry while Play is enabled. It does not identify people or track individual feet.
 
 Official references: [Realtime WebSockets](https://developers.openai.com/api/docs/guides/voice-websockets), [Decisions](https://developers.openai.com/api/docs/guides/decisions), [RealityKit](https://developer.apple.com/documentation/realitykit).
 
@@ -78,10 +89,10 @@ xcodebuild -project Cast.xcodeproj -scheme Cast \
 
 Use an installed simulator name from `xcrun simctl list devices available` if yours differs.
 
-- **26 unit tests passed** across the build-23 suite and its added imported-character movement regression test. Coverage includes command validation, all five USDZs, skeletal poses, movement math, scene snapshots, Decisions responses, cancellation and stale-response rejection.
+- **46 unit tests passed** for build 33, including depth projection, approach detection, navigation recovery, voice-command sequencing/cancellation, explicit walking commands and imported-character movement. Coverage includes command validation, all five USDZs, skeletal poses, movement math, scene snapshots, Decisions responses, cancellation and stale-response rejection.
 - Simulator UI checks cover character picking, editing gestures, the cast gallery, connection settings and contextual controls.
-- Build 23 compiles for iPhone and was installed on the physical test device.
-- **Open issue:** previous builds animated walking without reliably travelling on the physical device. Build 23 replaces friction-driven walking with controlled, support/clearance-checked steps. Its final physical-device walking retest is pending. Do not claim this issue is verified fixed.
+- Build 23 was installed and its walking was confirmed by the author on the physical test device. Build 24 adds experimental surroundings reflexes.
+- **Walking:** the author confirmed build 23 travels across the surface. Build 24 synchronizes gait to measured travel and smooths turning. Depth-driven avoidance still needs device testing; synthetic tests do not prove reliable avoidance in a room.
 - Realtime/Decisions integration is implemented; model outputs and account access are tested with mocked transport locally. Full live behaviour is not certified by the automated suite.
 
 See the [device checklist](docs/DEVICE_CHECKLIST.md). The earlier dynamic-body floor/wall experiment in `scripts/verify_locomotion.swift` does not validate build 23's complete AR walking controller.
@@ -103,7 +114,7 @@ Scene events → Decisions → selected feasible action ──┤
 - `SceneAwareness.swift`: measured phone/character proximity and lighting events, with hysteresis.
 - `CharacterVoice.swift`: deterministic character-specific nonverbal synthesis.
 
-Walking uses a kinematic controller with small checked steps; jumps and other physical reactions use dynamic bodies. Geometry is an estimate, not a perfect replica. Characters do not have articulated ragdolls, general room pathfinding, moving-person tracking or persistent saved-room placement.
+Walking uses a kinematic controller with small checked steps; jumps and other physical reactions use dynamic bodies. Geometry is an estimate, not a perfect replica. Characters do not have articulated ragdolls, general room pathfinding, semantic person/foot tracking or persistent saved-room placement. Experimental depth reflexes cover only what the phone currently sees.
 
 ## Privacy
 
@@ -124,3 +135,11 @@ App and original character assets: **MustafaB3irat**. Iggy, Felipe, Todd, Alfred
 Design guidance: [unslop](https://heydamir.design/unslop), by [Damir Sokolovsky](https://x.com/heydamir), [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Its guidance informed the UI; no skill source is bundled.
 
 See [CREDITS.md](CREDITS.md) for provenance and [RIGHTS.md](RIGHTS.md) for reuse terms. Public source availability does not grant a blanket asset or source-code redistribution licence.
+
+## Local surroundings reflexes
+
+Press **Play** after placement (or connect Live). On a supported LiDAR iPhone, Cast samples raw depth up to ten times per second, filters low-confidence points, excludes floor points, and requires a cluster with repeated approaching measurements. A local reflex interrupts play and cancels stale AI choices. It tries short escape routes on scanned support with room/character clearance; if none is available, it flinches in place. A cooldown prevents repeated reactions, and ordinary play can resume afterward. These reflexes work without an API key.
+
+People-depth occlusion is enabled when the combined configuration is supported, so a visible person can occlude characters. This is rendering support, not person recognition. The perception status reports whether depth is arriving. No depth maps, camera frames or raw point clouds are uploaded; the AI receives only a brief event description. Pause, Stop, selection and tracking loss suppress autonomous reflexes. Missing depth disables this extra layer rather than pretending the room is fully observed.
+
+Limits: nearest-cluster tracking is approximate, can miss fast/thin objects or confuse nearby shapes, and cannot see behind the camera. Safe-looking escape routes still depend on incomplete scan geometry. This is an interactive character prototype, not a collision-warning or physical safety system.
