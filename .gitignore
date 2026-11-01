@@ -1,0 +1,16 @@
+.DS_Store
+DerivedData*/
+Config/Signing.xcconfig
+Config/Secrets.xcconfig
+*.xcuserstate
+xcuserdata/
+*.ipa
+*.xcarchive
+.env*
+*.xcresult/
+*.log
+*.ips
+*.mobileprovision
+*.p12
+*.pem
+*.key

@@ -1,0 +1,2 @@
+// Copy to Signing.xcconfig (git-ignored) and enter your own team.
+DEVELOPMENT_TEAM = YOUR_TEAM_ID

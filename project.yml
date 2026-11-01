@@ -1,0 +1,50 @@
+name: Cast
+options:
+  bundleIdPrefix: com.pinmoir
+  deploymentTarget:
+    iOS: '18.0'
+settings:
+  base:
+    SWIFT_VERSION: '5.0'
+    TARGETED_DEVICE_FAMILY: '1'
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: '0.1.0'
+    CURRENT_PROJECT_VERSION: 23
+targets:
+  Cast:
+    type: application
+    platform: iOS
+    sources: [Cast]
+    configFiles:
+      Debug: Config/App.xcconfig
+      Release: Config/App.xcconfig
+    info:
+      path: Cast/Info.plist
+      properties:
+        CFBundleDisplayName: Cast
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        NSCameraUsageDescription: Cast uses the camera to place your characters in the room.
+        NSMicrophoneUsageDescription: Cast sends your voice to OpenAI while Live is on so characters can respond.
+        UIRequiredDeviceCapabilities: [arkit]
+        UIRequiresFullScreen: true
+  CastTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [CastTests]
+    dependencies:
+      - target: Cast
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+  CastUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [CastUITests]
+    dependencies:
+      - target: Cast
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
